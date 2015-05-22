@@ -1,6 +1,6 @@
 diff -r -u -d orig/shell.c ./shell.c
---- orig/shell.c	2015-05-08 11:10:06.525393270 -0700
-+++ ./shell.c	2015-05-08 11:17:28.275228469 -0700
+--- orig/shell.c	2015-05-21 03:28:10.000000000 +0900
++++ ./shell.c	2015-05-23 04:26:16.358501955 +0900
 @@ -52,6 +52,11 @@
  #endif
  #include <ctype.h>
@@ -36,9 +36,40 @@ diff -r -u -d orig/shell.c ./shell.c
  }
  
 diff -r -u -d orig/sqlite3.c ./sqlite3.c
---- orig/sqlite3.c	2015-05-08 11:10:07.173395986 -0700
-+++ ./sqlite3.c	2015-05-08 11:11:18.625694907 -0700
-@@ -25289,6 +25289,13 @@
+--- orig/sqlite3.c	2015-05-21 03:28:10.000000000 +0900
++++ ./sqlite3.c	2015-05-23 04:26:16.370501608 +0900
+@@ -22,6 +22,13 @@
+ #ifndef SQLITE_PRIVATE
+ # define SQLITE_PRIVATE static
+ #endif
++#ifdef QC_PERF
++extern void sqlite3_androidopt_init(void*, const char*) __attribute__((weak));
++extern void sqlite3_androidopt_open(void*, const char*, unsigned, int*) __attribute__((weak));
++extern void sqlite3_androidopt_close(void*) __attribute__((weak));
++extern int  sqlite3_androidopt_handle_pragma(void*, char*, char*) __attribute__((weak));
++#endif
++
+ /************** Begin file sqliteInt.h ***************************************/
+ /*
+ ** 2001 September 15
+@@ -11127,6 +11134,7 @@
+ #ifdef SQLITE_USER_AUTHENTICATION
+   sqlite3_userauth auth;        /* User authentication information */
+ #endif
++  u8 isSettingOverride;         /* True if db settings have been overridden */
+ };
+ 
+ /*
+@@ -17090,7 +17098,7 @@
+ ** The malloc.h header file is needed for malloc_usable_size() function
+ ** on some systems (e.g. Linux).
+ */
+-#if HAVE_MALLOC_H && HAVE_MALLOC_USABLE_SIZE
++#if defined(HAVE_MALLOC_H) || defined(HAVE_MALLOC_USABLE_SIZE)
+ #  define SQLITE_USE_MALLOC_H 1
+ #  define SQLITE_USE_MALLOC_USABLE_SIZE 1
+ /*
+@@ -25292,6 +25300,13 @@
  */
  #if SQLITE_OS_UNIX              /* This file is used on unix only */
  
@@ -52,7 +83,7 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
  /*
  ** There are various methods for file locking used for concurrency
  ** control:
-@@ -25843,7 +25850,12 @@
+@@ -25846,7 +25861,12 @@
  #else
    { "pread64",      (sqlite3_syscall_ptr)0,          0  },
  #endif
@@ -65,7 +96,7 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
  
    { "write",        (sqlite3_syscall_ptr)write,      0  },
  #define osWrite     ((ssize_t(*)(int,const void*,size_t))aSyscall[11].pCurrent)
-@@ -25861,8 +25873,14 @@
+@@ -25864,8 +25884,14 @@
  #else
    { "pwrite64",     (sqlite3_syscall_ptr)0,          0  },
  #endif
@@ -80,7 +111,7 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
  
    { "fchmod",       (sqlite3_syscall_ptr)fchmod,     0  },
  #define osFchmod    ((int(*)(int,mode_t))aSyscall[14].pCurrent)
-@@ -29112,7 +29130,7 @@
+@@ -29115,7 +29141,7 @@
    SimulateIOError( rc=1 );
    if( rc!=0 ){
      storeLastErrno((unixFile*)id, errno);
@@ -89,7 +120,7 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
    }
    *pSize = buf.st_size;
  
-@@ -29148,7 +29166,7 @@
+@@ -29151,7 +29177,7 @@
      struct stat buf;              /* Used to hold return values of fstat() */
     
      if( osFstat(pFile->h, &buf) ){
@@ -98,7 +129,7 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
      }
  
      nSize = ((nByte+pFile->szChunk-1) / pFile->szChunk) * pFile->szChunk;
-@@ -29733,7 +29751,7 @@
+@@ -29736,7 +29762,7 @@
      ** with the same permissions.
      */
      if( osFstat(pDbFd->h, &sStat) && pInode->bProcessLock==0 ){
@@ -107,7 +138,7 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
        goto shm_open_err;
      }
  
-@@ -31079,7 +31097,7 @@
+@@ -31082,7 +31108,7 @@
        *pUid = sStat.st_uid;
        *pGid = sStat.st_gid;
      }else{
@@ -116,7 +147,35 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
      }
    }else if( flags & SQLITE_OPEN_DELETEONCLOSE ){
      *pMode = 0600;
-@@ -105873,7 +105891,7 @@
+
+@@ -103904,6 +103930,14 @@
+     goto pragma_out;
+   }
+ 
++#ifdef QC_PERF
++  if( sqlite3_androidopt_handle_pragma ) {
++    if( sqlite3_androidopt_handle_pragma(db, zLeft, zRight) == 1 ) {
++      goto pragma_out;
++    }
++  }
++#endif
++
+   /* Send an SQLITE_FCNTL_PRAGMA file-control to the underlying VFS
+   ** connection.  If it returns SQLITE_OK, then assume that the VFS
+   ** handled the pragma and generate a no-op prepared statement.
+@@ -104185,6 +104219,11 @@
+         /* If the "=MODE" part does not match any known journal mode,
+         ** then do a query */
+         eMode = PAGER_JOURNALMODE_QUERY;
++      }else if( db->isSettingOverride==1 ){
++        /* Skip journal mode changes if override in effect */
++        sqlite3VdbeAddOp4(v, OP_String, strlen(zMode), 1, 1, zMode, P4_STATIC);
++        sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
++        goto pragma_out;
+       }
+     }
+     if( eMode==PAGER_JOURNALMODE_QUERY && pId2->n==0 ){
+@@ -105877,7 +105916,7 @@
    }
    if( pDb->pSchema->file_format>SQLITE_MAX_FILE_FORMAT ){
      sqlite3SetString(pzErrMsg, db, "unsupported file format");
@@ -125,7 +184,31 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
      goto initone_error_out;
    }
  
-@@ -130846,9 +130864,9 @@
+@@ -128966,6 +129005,11 @@
+   if( !sqlite3SafetyCheckSickOrOk(db) ){
+     return SQLITE_MISUSE_BKPT;
+   }
++#ifdef QC_PERF
++  if (sqlite3_androidopt_close) {
++    sqlite3_androidopt_close(db);
++  }
++#endif
+   sqlite3_mutex_enter(db->mutex);
+ 
+   /* Force xDisconnect calls on all virtual tables */
+@@ -130715,6 +130759,11 @@
+     }
+   }
+   sqlite3_mutex_enter(db->mutex);
++#ifdef QC_PERF
++  if( sqlite3_androidopt_init ) {
++    sqlite3_androidopt_init(db, zFilename);
++  }
++#endif
+   db->errMask = 0xff;
+   db->nDb = 2;
+   db->magic = SQLITE_MAGIC_BUSY;
+@@ -130850,9 +130899,9 @@
  #endif
  
  #ifdef SQLITE_ENABLE_FTS3
@@ -138,7 +221,22 @@ diff -r -u -d orig/sqlite3.c ./sqlite3.c
  #endif
  
  #ifdef SQLITE_ENABLE_ICU
-@@ -136906,16 +136924,28 @@
+@@ -130906,6 +130955,14 @@
+     db = 0;
+   }else if( rc!=SQLITE_OK ){
+     db->magic = SQLITE_MAGIC_SICK;
++  }else {
++#ifdef QC_PERF
++    if (sqlite3_androidopt_open) {
++      int override = 0;
++      sqlite3_androidopt_open(db, zFilename, flags, &override);
++      db->isSettingOverride = override;
++    }
++#endif
+   }
+   *ppDb = db;
+ #ifdef SQLITE_ENABLE_SQLLOG
+@@ -136910,16 +136967,28 @@
    ** module with sqlite.
    */
    if( SQLITE_OK==rc 
